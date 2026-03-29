@@ -70,7 +70,11 @@ func (p *PebbleFS) GetDiskUsage(path string) (pvfs.DiskUsage, error) {
 
 // Create ...
 func (p *PebbleFS) Create(name string) (pvfs.File, error) {
-	return p.fs.Create(name)
+	f, err := p.fs.Create(name)
+	if err != nil {
+		return nil, err
+	}
+	return &pebbleFile{File: f}, nil
 }
 
 // Link ...
@@ -84,15 +88,20 @@ func (p *PebbleFS) Open(name string, opts ...pvfs.OpenOption) (pvfs.File, error)
 	if err != nil {
 		return nil, err
 	}
+	pf := &pebbleFile{File: f}
 	for _, opt := range opts {
-		opt.Apply(f)
+		opt.Apply(pf)
 	}
-	return f, nil
+	return pf, nil
 }
 
 // OpenDir ...
 func (p *PebbleFS) OpenDir(name string) (pvfs.File, error) {
-	return p.fs.OpenDir(name)
+	f, err := p.fs.OpenDir(name)
+	if err != nil {
+		return nil, err
+	}
+	return &pebbleFile{File: f}, nil
 }
 
 // Remove ...
@@ -112,7 +121,11 @@ func (p *PebbleFS) Rename(oldname, newname string) error {
 
 // ReuseForWrite ...
 func (p *PebbleFS) ReuseForWrite(oldname, newname string) (pvfs.File, error) {
-	return p.fs.ReuseForWrite(oldname, newname)
+	f, err := p.fs.ReuseForWrite(oldname, newname)
+	if err != nil {
+		return nil, err
+	}
+	return &pebbleFile{File: f}, nil
 }
 
 // MkdirAll ...
@@ -175,4 +188,58 @@ func Clean(dir string) string {
 // ReportLeakedFD reports leaked file fds.
 func ReportLeakedFD(fs IFS, t *testing.T) {
 	gvfs.ReportLeakedFD(fs, t)
+}
+
+// pebbleFile wraps gvfs.File to implement pvfs.File (PebbleDB v1.1.5).
+// Adds Fd, OpenReadWrite, Preallocate, Prefetch, SyncData, SyncTo methods
+// that lni/vfs does not provide.
+type pebbleFile struct {
+	gvfs.File
+}
+
+// Fd returns an invalid file descriptor. lni/vfs does not expose raw
+// descriptors. PebbleDB uses Fd() only for optional optimizations
+// (Prefetch) and gracefully handles the invalid value.
+func (f *pebbleFile) Fd() uintptr {
+	return ^uintptr(0)
+}
+
+// Preallocate is a no-op. lni/vfs does not support preallocation.
+// PebbleDB treats this as an optional optimization hint.
+func (f *pebbleFile) Preallocate(offset, length int64) error {
+	return nil
+}
+
+// Prefetch is a no-op. lni/vfs does not support prefetch.
+// PebbleDB treats this as an optional optimization hint.
+func (f *pebbleFile) Prefetch(offset, length int64) error {
+	return nil
+}
+
+// SyncData syncs file data to stable storage. Delegates to Sync()
+// which syncs both data and metadata.
+func (f *pebbleFile) SyncData() error {
+	return f.Sync()
+}
+
+// SyncTo syncs data up to the specified length. Delegates to Sync()
+// which syncs the entire file. Returns false to indicate that the
+// full file was synced, not just the requested prefix.
+func (f *pebbleFile) SyncTo(length int64) (bool, error) {
+	return false, f.Sync()
+}
+
+// OpenReadWrite opens a file for reading and writing. lni/vfs does not
+// have a dedicated OpenReadWrite, so we delegate to Create which opens
+// the file for both reading and writing.
+func (p *PebbleFS) OpenReadWrite(name string, opts ...pvfs.OpenOption) (pvfs.File, error) {
+	f, err := p.fs.Create(name)
+	if err != nil {
+		return nil, err
+	}
+	pf := &pebbleFile{File: f}
+	for _, opt := range opts {
+		opt.Apply(pf)
+	}
+	return pf, nil
 }
